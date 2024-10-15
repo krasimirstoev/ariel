@@ -9,6 +9,7 @@ compose_email=false
 dnsbl_file=""
 max_procs=10  # Default value
 install_mode=false
+recipient_emails=()  # Array to hold email addresses
 
 # Paths to log files
 general_log="/var/log/ariel/general.log"
@@ -35,11 +36,12 @@ usage() {
     echo "  --compose_email          Compose and send an email with the results"
     echo "  --list=FILE              Specify the DNSBL list file (required)"
     echo "  --max_procs=N            Set the maximum number of parallel processes (used with priority 0)"
+    echo "  --email=ADDRESS          Specify an email address to send results to (can be used multiple times)"
     echo "  --install                Install the script and necessary files"
     echo "  --help                   Display this help message"
     echo
     echo "Example:"
-    echo "  $0 --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email"
+    echo "  $0 --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email --email=abuse@superhosting.bg"
     exit 1
 }
 
@@ -86,15 +88,6 @@ install() {
         echo "dnsbl.conf not found in script directory ($script_dir)."
     fi
 
-    # Copy email.conf to /etc/ariel/
-    if [ -f "$script_dir/email.conf" ]; then
-        cp "$script_dir/email.conf" /etc/ariel/
-        chmod 644 /etc/ariel/email.conf
-        echo "Copied email.conf to /etc/ariel/"
-    else
-        echo "email.conf not found in script directory ($script_dir)."
-    fi
-
     # Create /root/scripts/ if it doesn't exist and copy the ariel script
     if [ ! -d "/root/scripts/" ]; then
         mkdir -p /root/scripts/
@@ -128,6 +121,7 @@ while [[ "$#" -gt 0 ]]; do
         --compose_email) compose_email=true; shift ;;
         --list=*) dnsbl_file="${1#*=}"; shift ;;
         --max_procs=*) max_procs="${1#*=}"; shift ;;
+        --email=*) recipient_emails+=("${1#*=}"); shift ;;
         --install) install_mode=true; shift ;;
         --help) usage ;;
         *) echo "Unknown parameter: $1"; usage ;;
@@ -147,6 +141,11 @@ fi
 
 if [ -z "$dnsbl_file" ]; then
     echo "Error: The --list parameter is required."
+    usage
+fi
+
+if [ "$compose_email" = true ] && [ "${#recipient_emails[@]}" -eq 0 ]; then
+    echo "Error: At least one --email=ADDRESS must be specified when using --compose_email."
     usage
 fi
 
@@ -175,26 +174,6 @@ if [ ! -f "$dnsbl_file" ]; then
 fi
 
 mapfile -t dnsbls < "$dnsbl_file"
-
-# Read email configuration
-email_conf="/etc/ariel/email.conf"
-if [ -f "$email_conf" ]; then
-    # Read all email addresses into an array
-    mapfile -t recipient_emails < "$email_conf"
-    # Remove empty lines and whitespace
-    recipient_emails=("${recipient_emails[@]//#*/}")   # Remove comments
-    recipient_emails=("${recipient_emails[@]/%/}")     # Remove trailing whitespace
-    recipient_emails=("${recipient_emails[@]/#/}")     # Remove leading whitespace
-    recipient_emails=("${recipient_emails[@]/#/}")     # Remove empty entries
-    # Check if we have at least one email address
-    if [ "${#recipient_emails[@]}" -eq 0 ]; then
-        echo "Error: No email addresses found in $email_conf"
-        exit 1
-    fi
-else
-    echo "Error: Email configuration file not found: $email_conf"
-    exit 1
-fi
 
 # Implement locking mechanism
 if [ "$lock" = true ]; then
@@ -348,7 +327,7 @@ else
     fi
 fi
 
-# Compose summary email (always send email)
+# Compose summary email (if compose_email is true)
 if [ "$compose_email" = true ]; then
     subject="Scan results for network $network/24"
 
@@ -359,30 +338,30 @@ if [ "$compose_email" = true ]; then
         # If there are blacklisted IPs
         body+="
 
-    The following IP addresses have been found blacklisted:"
+The following IP addresses have been found blacklisted:"
 
         for ip in "${!blacklisted_ips[@]}"; do
             dnsbl_list="${blacklisted_ips[$ip]}"
             body+="
-    $ip - $dnsbl_list"
+$ip - $dnsbl_list"
         done
 
         body+="
 
-    Please take the necessary actions."
+Please take the necessary actions."
     else
         # If no blacklisted IPs are found
         body+="
 
-    No blacklisted IP addresses were found in the network $network/24.
+No blacklisted IP addresses were found in the network $network/24.
 
-    No further action is required."
+No further action is required."
     fi
 
     body+="
 
-    Best regards,
-    Your automated system"
+Best regards,
+Your automated system"
 
     # Save a backup copy of the email before sending
     backup_email_dir="/var/backups/ariel/emails"

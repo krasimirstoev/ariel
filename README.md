@@ -59,21 +59,6 @@ bl.spamcop.net
 zen.spamhaus.org
 b.barracudacentral.org
 ```
-
-### email.conf
-
--   **Location**: `/etc/ariel/email.conf`
--   **Description**: Contains a list of email addresses to which the script sends results.
--   **Format**: One email address per line. Empty lines and lines starting with `#` are ignored.
-
-**Example**:
-```bash
-admin@example.com
-security@example.com
-# support@example.com
-```
-
-
 ## Usage 🚀
 
 ### Syntax
@@ -90,6 +75,7 @@ security@example.com
 -   `--compose_email`: Composes and sends an email with the scan results.
 -   `--list=FILE`: Specifies the file containing the list of DNSBL domains (required).
 -   `--max_procs=N`: Sets the maximum number of parallel processes (used with `--priority=0`).
+-   `--email=ADDRESS`: Specifies an email address to send results to (can be used multiple times).
 -   `--install`: Installs the script and necessary files.
 -   `--help`: Displays a help message with available options.
 
@@ -97,11 +83,11 @@ security@example.com
 
 #### Standard Execution
 ```bash
-/bin/bash ariel --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email
+/bin/bash ariel --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email --email=admin@example.com
 ```
 #### Using Priority and Parallel Processing ⚡⚡⚡
 ```bash
-/bin/bash ariel --network=192.168.1.0 --priority=0 --max_procs=15 --list=/etc/ariel/dnsbl.conf --compose_email
+/bin/bash ariel --network=192.168.1.0 --priority=0 --max_procs=15 --list=/etc/ariel/dnsbl.conf --compose_email --email=admin@example.com
 ```
 
 **Important**: Using `--priority=0` with `--max_procs` allows the script to perform multiple checks in parallel, significantly speeding up the process. However, this should be used cautiously to avoid overloading the network or being blocked by DNSBL services due to excessive requests.
@@ -134,7 +120,7 @@ security@example.com
 1.  **Initialization**: The script reads command-line parameters and configuration files.
 2.  **IP Address Checking**: For each IP address in the specified network, the script performs DNS queries against all DNSBL domains listed in `dnsbl.conf`.
 3.  **Result Processing**: If an IP address is found in a blacklist, the result is recorded and included in the summary email.
-4.  **Email Notification**: After completing the checks, the script sends a summary email to all addresses listed in `email.conf`.
+4.  **Email Notification**: After completing the checks, the script sends a summary email to all addresses specified via `--email=` argument.
 5.  **Logging**: Throughout execution, the script logs information to log files for easy tracking.
 
 ## Setting Up Cron Jobs 🕒
@@ -145,12 +131,12 @@ Automate the execution of the Ariel script by setting up cron jobs. You can add 
 
  **Daily Scan at 2 AM** 
 ```bash
-0 2 * * * root /bin/bash /root/scripts/ariel --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email --lock
+0 2 * * * root /bin/bash /root/scripts/ariel --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email --email=admin@example.com --lock
 ```
 
 **Weekly Scan with High Priority on Sundays at 3 AM**
 ```bash
-0 3 * * 0 root /bin/bash /root/scripts/ariel --network=192.168.2.0 --priority=2 --list=/etc/ariel/dnsbl.conf --compose_email --lock
+0 3 * * 0 root /bin/bash /root/scripts/ariel --network=192.168.2.0 --priority=2 --list=/etc/ariel/dnsbl.conf --compose_email --email=admin@example.com --lock
 ```
 **Note**: Ensure that the `ariel` script is executable and located in `/root/scripts/` as per the installation instructions.
 ---
