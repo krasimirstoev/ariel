@@ -1,0 +1,420 @@
+#!/bin/bash
+
+# Initialize variables
+network=""
+priority=1
+lock=false
+log_everything=false
+compose_email=false
+dnsbl_file=""
+max_procs=10  # Default value
+install_mode=false
+
+# Paths to log files
+general_log="/var/log/ariel/general.log"
+blacklisted_log="/var/log/ariel/blacklisted.log"
+
+# Small logging functions
+log() {
+    echo "[$(date +"%d.%m.%Y %T")] $1" >> "$general_log"
+}
+
+log_blacklisted() {
+    echo "[$(date +"%d.%m.%Y %T")] $1" >> "$blacklisted_log"
+}
+
+# Function to display usage information
+usage() {
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "Options:"
+    echo "  --network=NETWORK        Specify the network to scan (required)"
+    echo "  --priority=PRIORITY      Set the priority level (default: 1)"
+    echo "  --lock                   Enable locking to prevent concurrent runs"
+    echo "  --log_everything         Log all activities, including non-blacklisted checks"
+    echo "  --compose_email          Compose and send an email with the results"
+    echo "  --list=FILE              Specify the DNSBL list file (required)"
+    echo "  --max_procs=N            Set the maximum number of parallel processes (used with priority 0)"
+    echo "  --install                Install the script and necessary files"
+    echo "  --help                   Display this help message"
+    echo
+    echo "Example:"
+    echo "  $0 --network=192.168.1.0 --list=/etc/ariel/dnsbl.conf --compose_email"
+    exit 1
+}
+
+# Function to perform installation
+install() {
+    echo "Starting installation..."
+
+    # Create directories with correct permissions
+
+    # 1. Create /var/log/ariel/ and set permissions
+    if [ ! -d "/var/log/ariel/" ]; then
+        mkdir -p /var/log/ariel/
+        chmod 755 /var/log/ariel/
+        echo "Created directory /var/log/ariel/"
+    else
+        echo "Directory /var/log/ariel/ already exists"
+    fi
+
+    # 2. Create /var/backups/ariel/emails/ and set permissions
+    if [ ! -d "/var/backups/ariel/emails/" ]; then
+        mkdir -p /var/backups/ariel/emails/
+        chmod -R 755 /var/backups/ariel/
+        echo "Created directory /var/backups/ariel/emails/"
+    else
+        echo "Directory /var/backups/ariel/emails/ already exists"
+    fi
+
+    # 3. Create /etc/ariel/ and set permissions
+    if [ ! -d "/etc/ariel/" ]; then
+        mkdir -p /etc/ariel/
+        chmod 755 /etc/ariel/
+        echo "Created directory /etc/ariel/"
+    else
+        echo "Directory /etc/ariel/ already exists"
+    fi
+
+    # Copy dnsbl.conf to /etc/ariel/
+    script_dir="$(dirname "$(readlink -f "$0")")"
+    if [ -f "$script_dir/dnsbl.conf" ]; then
+        cp "$script_dir/dnsbl.conf" /etc/ariel/
+        chmod 644 /etc/ariel/dnsbl.conf
+        echo "Copied dnsbl.conf to /etc/ariel/"
+    else
+        echo "dnsbl.conf not found in script directory ($script_dir)."
+    fi
+
+    # Copy email.conf to /etc/ariel/
+    if [ -f "$script_dir/email.conf" ]; then
+        cp "$script_dir/email.conf" /etc/ariel/
+        chmod 644 /etc/ariel/email.conf
+        echo "Copied email.conf to /etc/ariel/"
+    else
+        echo "email.conf not found in script directory ($script_dir)."
+    fi
+
+    # Create /root/scripts/ if it doesn't exist and copy the ariel script
+    if [ ! -d "/root/scripts/" ]; then
+        mkdir -p /root/scripts/
+        chmod 700 /root/scripts/
+        echo "Created directory /root/scripts/"
+    else
+        echo "Directory /root/scripts/ already exists"
+    fi
+
+    # Copy the ariel script to /root/scripts/
+    cp "$script_dir/$(basename "$0")" /root/scripts/
+    chmod 700 /root/scripts/$(basename "$0")
+    echo "Copied ariel script to /root/scripts/"
+
+    echo "Installation completed."
+    exit 0
+}
+
+# Check if no arguments are provided
+if [ "$#" -eq 0 ]; then
+    usage
+fi
+
+# Parse command-line arguments
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --network=*) network="${1#*=}"; shift ;;
+        --priority=*) priority="${1#*=}"; shift ;;
+        --lock) lock=true; shift ;;
+        --log_everything) log_everything=true; shift ;;
+        --compose_email) compose_email=true; shift ;;
+        --list=*) dnsbl_file="${1#*=}"; shift ;;
+        --max_procs=*) max_procs="${1#*=}"; shift ;;
+        --install) install_mode=true; shift ;;
+        --help) usage ;;
+        *) echo "Unknown parameter: $1"; usage ;;
+    esac
+done
+
+# If install mode is enabled, perform installation and exit
+if [ "$install_mode" = true ]; then
+    install
+fi
+
+# Validate required parameters
+if [ -z "$network" ]; then
+    echo "Error: The --network parameter is required."
+    usage
+fi
+
+if [ -z "$dnsbl_file" ]; then
+    echo "Error: The --list parameter is required."
+    usage
+fi
+
+# Validate max_procs if priority=0
+if [ "$priority" -eq 0 ]; then
+    if ! [[ "$max_procs" =~ ^[0-9]+$ ]] || [ "$max_procs" -le 0 ]; then
+        echo "Error: --max_procs must be a positive integer."
+        exit 1
+    fi
+fi
+
+# Determine if the script is run from cron or manually
+parent_cmd=$(ps -o comm= $PPID)
+if [ "$parent_cmd" = "cron" ]; then
+    run_type="cron job"
+else
+    run_type="manual run"
+fi
+
+network_prefix="${network%.*}"
+
+# Read DNSBL list
+if [ ! -f "$dnsbl_file" ]; then
+    echo "Error: DNSBL list file not found: $dnsbl_file"
+    exit 1
+fi
+
+mapfile -t dnsbls < "$dnsbl_file"
+
+# Read email configuration
+email_conf="/etc/ariel/email.conf"
+if [ -f "$email_conf" ]; then
+    # Read all email addresses into an array
+    mapfile -t recipient_emails < "$email_conf"
+    # Remove empty lines and whitespace
+    recipient_emails=("${recipient_emails[@]//#*/}")   # Remove comments
+    recipient_emails=("${recipient_emails[@]/%/}")     # Remove trailing whitespace
+    recipient_emails=("${recipient_emails[@]/#/}")     # Remove leading whitespace
+    recipient_emails=("${recipient_emails[@]/#/}")     # Remove empty entries
+    # Check if we have at least one email address
+    if [ "${#recipient_emails[@]}" -eq 0 ]; then
+        echo "Error: No email addresses found in $email_conf"
+        exit 1
+    fi
+else
+    echo "Error: Email configuration file not found: $email_conf"
+    exit 1
+fi
+
+# Implement locking mechanism
+if [ "$lock" = true ]; then
+    lock_file="/var/run/ariel.$(echo "$network" | tr '.' '_').lock"
+    if [ -e "$lock_file" ]; then
+        # Log the attempt to start the script when lock file exists
+        log "Attempted to start script for network $network (Run type: $run_type), but it was aborted due to existing lock file."
+        echo "Lock file already exists. Exiting."
+        exit 1
+    else
+        touch "$lock_file"
+    fi
+fi
+
+# Create temporary file in /dev/shm
+temp_file="/dev/shm/ariel_$$.tmp"
+touch "$temp_file"
+
+# Function to clean up lock file and temporary file on exit
+cleanup() {
+    if [ "$lock" = true ]; then
+        rm -f "$lock_file"
+    fi
+    rm -f "$temp_file"
+}
+trap cleanup EXIT
+
+# Function to get random sleep time based on priority
+get_sleep_time() {
+    case $priority in
+        0) sleep_time=0 ;;
+        1) min=1; max=5 ;;
+        2) min=5; max=60 ;;
+        3) min=60; max=240 ;;
+        4) min=240; max=600 ;;
+        5) min=240; max=3600 ;;
+        *) min=1; max=5 ;; # default to priority 1
+    esac
+    if [ "$priority" -eq 0 ]; then
+        sleep_time=0
+    else
+        sleep_time=$(shuf -i $min-$max -n 1)
+    fi
+    echo "$sleep_time"
+}
+
+# Log start time to general.log
+if [ "$priority" -eq 0 ]; then
+    log "Script started for network $network (Priority: $priority, Max Procs: $max_procs, Run type: $run_type)"
+else
+    log "Script started for network $network (Priority: $priority, Run type: $run_type)"
+fi
+
+# Initialize summary variables
+declare -A blacklisted_ips
+
+# Semaphore function to limit concurrent processes
+semaphore() {
+    local max="$1"
+    while [ "$(jobs -rp | wc -l)" -ge "$max" ]; do
+        sleep 0.1
+    done
+}
+
+# Function to process a single IP address
+process_ip() {
+    local ip="$1"
+    local reverse_ip="$2"
+
+    for dnsbl in "${dnsbls[@]}"; do
+        query="$reverse_ip.$dnsbl"
+
+        output=$(dig +short -t a "$query")
+
+        if [ "$log_everything" = true ]; then
+            if [ -n "$output" ]; then
+                log_blacklisted "$ip is blacklisted on $dnsbl"
+            else
+                log_blacklisted "$ip is not blacklisted on $dnsbl"
+            fi
+        fi
+
+        if [ -n "$output" ]; then
+            # Use file locking to prevent race conditions
+            (
+                flock -x 200
+                echo "$ip|$dnsbl" >> "$temp_file"
+            ) 200>"$temp_file.lock"
+        fi
+
+        # Wait between each dig command if priority > 0
+        if [ "$priority" -gt 0 ]; then
+            sleep_time=$(get_sleep_time)
+            if [ "$sleep_time" -gt 0 ]; then
+                sleep "$sleep_time"
+            fi
+        fi
+    done
+}
+
+# Main execution loop
+if [ "$priority" -eq 0 ]; then
+    # Priority 0: Run dig commands in parallel
+    for i in {1..254}; do
+        ip="$network_prefix.$i"
+        # Reverse the IP address
+        IFS='.' read -r -a octets <<< "$ip"
+        reverse_ip="${octets[3]}.${octets[2]}.${octets[1]}.${octets[0]}"
+
+        # Control concurrency
+        semaphore "$max_procs"
+
+        # Run the process_ip function in the background
+        process_ip "$ip" "$reverse_ip" &
+    done
+
+    # Wait for all background jobs to finish
+    wait
+
+    # Aggregate results
+    if [ -s "$temp_file" ]; then
+        while IFS='|' read -r ip dnsbl; do
+            if [ -z "${blacklisted_ips["$ip"]}" ]; then
+                blacklisted_ips["$ip"]="$dnsbl"
+            else
+                blacklisted_ips["$ip"]+=", $dnsbl"
+            fi
+        done < "$temp_file"
+    fi
+
+else
+    # Priority > 0: Run dig commands sequentially with sleep intervals
+    for i in {1..254}; do
+        ip="$network_prefix.$i"
+        # Reverse the IP address
+        IFS='.' read -r -a octets <<< "$ip"
+        reverse_ip="${octets[3]}.${octets[2]}.${octets[1]}.${octets[0]}"
+
+        process_ip "$ip" "$reverse_ip"
+    done
+
+    # Aggregate results
+    if [ -s "$temp_file" ]; then
+        while IFS='|' read -r ip dnsbl; do
+            if [ -z "${blacklisted_ips["$ip"]}" ]; then
+                blacklisted_ips["$ip"]="$dnsbl"
+            else
+                blacklisted_ips["$ip"]+=", $dnsbl"
+            fi
+        done < "$temp_file"
+    fi
+fi
+
+# Compose summary email (always send email)
+if [ "$compose_email" = true ]; then
+    subject="Scan results for network $network/24"
+
+    # Initialize email body
+    body="Hello,"
+
+    if [ ${#blacklisted_ips[@]} -gt 0 ]; then
+        # If there are blacklisted IPs
+        body+="
+
+    The following IP addresses have been found blacklisted:"
+
+        for ip in "${!blacklisted_ips[@]}"; do
+            dnsbl_list="${blacklisted_ips[$ip]}"
+            body+="
+    $ip - $dnsbl_list"
+        done
+
+        body+="
+
+    Please take the necessary actions."
+    else
+        # If no blacklisted IPs are found
+        body+="
+
+    No blacklisted IP addresses were found in the network $network/24.
+
+    No further action is required."
+    fi
+
+    body+="
+
+    Best regards,
+    Your automated system"
+
+    # Save a backup copy of the email before sending
+    backup_email_dir="/var/backups/ariel/emails"
+
+    timestamp=$(date '+%Y-%m-%d-%H:%M')
+    network_filename=$(echo "$network" | tr '/' '-' ).log
+    backup_email_file="$backup_email_dir/${timestamp}-${network_filename}"
+
+    # Build the 'To' header with all recipient emails
+    to_header="To: $(IFS=, ; echo "${recipient_emails[*]}")"
+
+    # Save the email to the backup file
+    {
+        echo "Subject: $subject"
+        echo "$to_header"
+        echo "$body"
+    } > "$backup_email_file"
+
+    # Send the email to all recipients
+    {
+        echo "Subject: $subject"
+        echo "$to_header"
+        echo "$body"
+    } | sendmail -t
+
+    # Log the appropriate message in general.log
+    if [ ${#blacklisted_ips[@]} -gt 0 ]; then
+        log "Email sent to: ${recipient_emails[*]}"
+    else
+        log "No blacklisted IP addresses found for network $network, but email was sent to: ${recipient_emails[*]}"
+    fi
+fi
+
+# Log end time to general.log
+log "Script finished for network $network"
