@@ -157,9 +157,21 @@ if [ "$priority" -eq 0 ]; then
     fi
 fi
 
-# Determine if the script is run from cron or manually
-parent_cmd=$(ps -o comm= $PPID)
-if [ "$parent_cmd" = "cron" ]; then
+# Function to check if any ancestor process is cron
+is_cron_parent() {
+    local pid=$$
+    while [ "$pid" -ne 1 ]; do
+        pid=$(ps -o ppid= -p "$pid" | tr -d ' ')
+        parent_cmd=$(ps -o comm= -p "$pid")
+        if [ "$parent_cmd" = "cron" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Determine run type
+if is_cron_parent; then
     run_type="cron job"
 else
     run_type="manual run"
