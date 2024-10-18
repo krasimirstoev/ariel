@@ -381,11 +381,7 @@ Your automated system"
     } > "$backup_email_file"
 
     # Send the email to all recipients
-    {
-        echo "Subject: $subject"
-        echo "$to_header"
-        echo "$body"
-    } | sendmail -t
+    echo "$body" | mail -s "$subject" "${recipient_emails[@]}"
 
     # Log the appropriate message in general.log
     if [ ${#blacklisted_ips[@]} -gt 0 ]; then
