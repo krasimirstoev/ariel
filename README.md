@@ -185,18 +185,6 @@ zen.spamhaus.org
 b.barracudacentral.org
 dnsbl.sorbs.net
 ```
-### email.conf
-
-Located at `/etc/ariel/email.conf`, this file should contain email addresses, one per line. Empty lines and lines starting with `#` are ignored.
-
-**Example**:
-```bash
-admin@example.com
-security@example.com
-support@example.com
-# Uncomment the following line to add the IT department
-# it@example.com
-```
 ## Sample Email Output 📧
 
 ### When Blacklisted IPs Are Found
